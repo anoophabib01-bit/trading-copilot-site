@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading Co-Pilot</title>
+<meta name="description" content="A single-trader co-pilot for Micro Nasdaq and Micro Gold futures. It watches a live TradingView chart, reads the broker panel, and holds the line on a rulebook where no number exists without the day it changed and what that day cost.">
+
+<!-- ===========================================================================
+     DataFast analytics.
+     Two values are REQUIRED and both are currently placeholders.
+       1. data-website-id — from https://datafa.st/dashboard (looks like dfid_ab12cd34)
+       2. data-domain     — the domain this page is actually served from, e.g. example.com
+     Tracking stays inert until both are real. Do NOT set data-allow-localhost here:
+     it would fold your own local visits into the live numbers.
+     Full runbook: landing/DEPLOY.md
+     =========================================================================== -->
+<script defer
+  data-website-id="dfid_REPLACE_ME"
+  data-domain="REPLACE_ME.com"
+  src="https://datafa.st/js/script.js"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#14181f;
+    --panel:#1a1f28;
+    --rule:#272e39;
+    --ink:#e8e1d3;
+    --dim:#8b919b;
+    --amber:#d99b2e;
+    --green:#6fa88a;
+    --red:#c0674e;
+    --sans:"Archivo","Helvetica Neue",Arial,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Consolas,monospace;
+  }
+
+  *{box-sizing:border-box}
+
+  body{
+    background:var(--ground);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:17px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .wrap{max-width:960px;margin:0 auto;padding:0 28px}
+
+  /* ---------- masthead ---------- */
+
+  header{padding:44px 0 0}
+  .mast{
+    display:flex;justify-content:space-between;align-items:baseline;
+    gap:20px;flex-wrap:wrap;
+    padding-bottom:14px;border-bottom:1px solid var(--rule);
+  }
+  .mark{font-size:1rem;font-weight:600;letter-spacing:.01em}
+  .mark span{color:var(--dim);font-weight:400}
+  .whereabouts{font-family:var(--mono);font-size:.8125rem;color:var(--dim)}
+
+  /* ---------- hero ---------- */
+
+  .hero{padding:76px 0 8px}
+  h1{
+    font-size:clamp(2.5rem,6.4vw,4.25rem);
+    font-weight:600;
+    line-height:1.02;
+    letter-spacing:-.028em;
+    margin:0;
+    max-width:15ch;
+  }
+  .standfirst{
+    margin:26px 0 0;
+    max-width:56ch;
+    color:var(--dim);
+    font-size:1.125rem;
+  }
+  .standfirst b{color:var(--ink);font-weight:500}
+
+  /* ---------- the drawdown graphic ---------- */
+
+  figure{margin:52px 0 0}
+  .plot{display:block;width:100%;height:auto;overflow:visible}
+
+  /* The floor keeps its dashes and is revealed by a left-to-right wipe; the equity
+     line traces itself with a dash offset. Two techniques because one element
+     cannot both be dashed and use stroke-dasharray as its reveal. */
+  .floor-line{fill:none;stroke:var(--amber);stroke-width:1.5;stroke-dasharray:5 4}
+  .equity-line{fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round;stroke-linecap:round;
+    stroke-dasharray:900;stroke-dashoffset:900}
+  .buffer{fill:var(--green);opacity:0}
+  .axis{stroke:var(--rule);stroke-width:1}
+  .plot text{font-family:var(--mono);font-size:11px;fill:var(--dim);opacity:0}
+  .plot .lit{fill:var(--amber)}
+  #wiperect{transform:scaleX(0);transform-origin:0 0}
+
+  .go #wiperect{animation:wipe 1200ms cubic-bezier(.65,0,.35,1) 200ms forwards}
+  .go .equity-line{animation:trace 1700ms cubic-bezier(.5,0,.2,1) 700ms forwards}
+  .go .buffer{animation:tint 900ms ease-out 2000ms forwards}
+  .go .plot text{animation:surface 700ms ease-out 2300ms forwards}
+
+  @keyframes wipe{to{transform:scaleX(1)}}
+  @keyframes trace{to{stroke-dashoffset:0}}
+  @keyframes tint{to{opacity:.13}}
+  @keyframes surface{to{opacity:1}}
+
+  figcaption{
+    margin-top:18px;color:var(--dim);font-size:.9375rem;max-width:62ch;
+  }
+
+  /* ---------- sections ---------- */
+
+  section{padding:88px 0 0}
+  h2{
+    font-size:1.375rem;font-weight:600;letter-spacing:-.015em;
+    margin:0 0 8px;
+  }
+  .lede{margin:0 0 34px;color:var(--dim);max-width:60ch}
+
+  /* marginalia grid: fact left, reasoning right */
+  .marg{display:grid;grid-template-columns:9.5rem 1fr;gap:0 28px}
+  .marg>div{
+    padding:17px 0;border-top:1px solid var(--rule);
+  }
+  .marg>div:nth-child(-n+2){border-top:none}
+  .fact{
+    font-family:var(--mono);font-size:.8125rem;color:var(--amber);
+    line-height:1.5;padding-top:19px !important;
+  }
+  .marg p{margin:0;max-width:58ch}
+  .marg p+p{margin-top:8px;color:var(--dim);font-size:.9375rem}
+
+  /* ---------- the rule switcher ---------- */
+
+  .switch{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px}
+  .switch button{
+    font-family:var(--mono);font-size:.8125rem;
+    background:transparent;color:var(--dim);
+    border:1px solid var(--rule);border-radius:2px;
+    padding:6px 11px;cursor:pointer;
+    transition:color 160ms,border-color 160ms;
+  }
+  .switch button:hover{color:var(--ink);border-color:#3b444f}
+  .switch button[aria-selected="true"]{color:var(--ground);background:var(--amber);border-color:var(--amber)}
+  .switch button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+
+  .card{
+    background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+    padding:24px 26px;font-family:var(--mono);font-size:.875rem;line-height:1.72;
+  }
+  .card .k{color:var(--green)}
+  .card .v{color:var(--ink)}
+  .card .why{
+    display:block;margin-top:14px;padding-top:14px;
+    border-top:1px solid var(--rule);
+    color:var(--dim);font-size:.8125rem;line-height:1.78;
+    max-width:74ch;
+  }
+  .card .why em{color:var(--amber);font-style:normal}
+  .fade{animation:fade 260ms ease-out}
+  @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+  /* ---------- the guardrail bar ---------- */
+
+  .hud{
+    position:relative;height:46px;margin-top:6px;
+    border:1px solid var(--rule);border-radius:3px;background:var(--panel);
+    overflow:hidden;
+  }
+  .hud div{
+    position:absolute;inset:0;
+    display:flex;align-items:center;gap:12px;padding:0 18px;
+    font-family:var(--mono);font-size:.8125rem;
+    opacity:0;
+    animation:hudcycle 13s linear infinite;
+  }
+  .hud div:nth-child(1){color:var(--green);animation-delay:0s}
+  .hud div:nth-child(2){color:var(--amber);animation-delay:3.25s}
+  .hud div:nth-child(3){color:var(--dim);animation-delay:6.5s}
+  .hud div:nth-child(4){color:var(--red);animation-delay:9.75s}
+  .hud b{font-weight:500;margin-left:auto;color:var(--dim)}
+  @keyframes hudcycle{
+    0%{opacity:0}
+    3%{opacity:1}
+    22%{opacity:1}
+    25%{opacity:0}
+    100%{opacity:0}
+  }
+
+  /* ---------- order paths ---------- */
+
+  .grave{
+    border-left:2px solid var(--red);padding:2px 0 2px 22px;
+    margin:30px 0 0;max-width:62ch;
+  }
+  .grave p{margin:0 0 10px}
+  .grave p:last-child{margin-bottom:0}
+  .grave code{font-family:var(--mono);font-size:.875rem;color:var(--amber)}
+
+  /* ---------- scale ---------- */
+
+  .scale{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:3px}
+  .scale div{background:var(--panel);padding:20px 18px}
+  .scale dt{font-family:var(--mono);font-size:1.5rem;color:var(--ink);letter-spacing:-.02em}
+  .scale dd{margin:5px 0 0;color:var(--dim);font-size:.875rem;line-height:1.45}
+
+  /* ---------- run ---------- */
+
+  .run{
+    font-family:var(--mono);font-size:.875rem;line-height:2;
+    background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+    padding:22px 26px;margin-top:6px;
+  }
+  .run .c{color:var(--dim)}
+  .run .p{color:var(--amber)}
+
+  footer{
+    margin-top:96px;padding:24px 0 64px;border-top:1px solid var(--rule);
+    color:var(--dim);font-size:.875rem;
+    display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;
+  }
+  footer span{font-family:var(--mono);font-size:.8125rem}
+
+  @media (max-width:720px){
+    body{font-size:16px}
+    .marg{grid-template-columns:1fr;gap:0}
+    .marg>div{border-top:none;padding:0}
+    .marg .fact{padding:22px 0 0 !important;border-top:1px solid var(--rule)}
+    .marg>div:nth-child(2){padding-bottom:0}
+    .marg .fact:first-child{border-top:none;padding-top:0 !important}
+    .marg p{padding-bottom:2px}
+    .scale{grid-template-columns:repeat(2,1fr)}
+    section{padding-top:68px}
+    .card{padding:20px;font-size:.8125rem}
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    #wiperect{transform:none}
+    .equity-line{stroke-dashoffset:0}
+    .buffer{opacity:.13}
+    .plot text{opacity:1}
+    .go #wiperect,.go .equity-line,.go .buffer,.go .plot text{animation:none}
+    .hud div{animation:none;opacity:0}
+    .hud div:nth-child(1){opacity:1}
+    .fade{animation:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <div class="mast">
+      <div class="mark">Trading Co-Pilot <span>— a trading desk that argues back</span></div>
+      <div class="whereabouts">local only · one machine · one copy</div>
+    </div>
+  </header>
+
+  <div class="hero">
+    <h1>Every rule here has a receipt.</h1>
+    <p class="standfirst">
+      A single-trader co-pilot for Micro Nasdaq and Micro Gold futures. It watches a live
+      TradingView chart, reads the broker panel, and holds the line on a rulebook where
+      <b>no number exists without the day it changed and what that day cost</b>.
+    </p>
+
+    <figure id="fig">
+      <svg class="plot" viewBox="0 0 760 232" role="img"
+           aria-label="An equity line staying above a drawdown floor that ratchets upward in steps and never falls. The gap between them is the buffer.">
+        <defs>
+          <clipPath id="wipe" clipPathUnits="userSpaceOnUse">
+            <rect id="wiperect" x="0" y="0" width="760" height="232"></rect>
+          </clipPath>
+        </defs>
+
+        <line class="axis" x1="0" y1="215" x2="760" y2="215"></line>
+
+        <path class="buffer"
+              d="M 0 196 L 60 178 L 110 188 L 150 160 L 200 172 L 250 146 L 300 158 L 350 132
+                 L 400 150 L 450 118 L 500 136 L 560 108 L 620 124 L 700 100 L 760 112
+                 L 760 152 L 470 152 L 470 172 L 340 172 L 340 190 L 140 190 L 140 200 L 0 200 Z"></path>
+
+        <path class="floor-line" clip-path="url(#wipe)"
+              d="M 0 200 H 140 V 190 H 340 V 172 H 470 V 152 H 760"></path>
+
+        <path class="equity-line"
+              d="M 0 196 L 60 178 L 110 188 L 150 160 L 200 172 L 250 146 L 300 158 L 350 132
+                 L 400 150 L 450 118 L 500 136 L 560 108 L 620 124 L 700 100 L 760 112"></path>
+
+        <text x="0" y="228">balance</text>
+        <text class="lit" x="0" y="213" style="fill:#d99b2e">drawdown floor · end-of-day trailing</text>
+        <text x="616" y="88">buffer $2,000</text>
+      </svg>
+      <figcaption>
+        The floor only ever ratchets up. Touch it once and the account is gone — so the buffer,
+        not the profit, is the number the app puts in front of you all day.
+      </figcaption>
+    </figure>
+  </div>
+
+  <section>
+    <h2>The rulebook is a data file, and it remembers</h2>
+    <p class="lede">
+      Every discipline rule lives in <code style="font-family:var(--mono);font-size:.875rem;color:var(--amber)">app/rules.json</code>,
+      never in code. Each value sits beside a comment recording the evidence that set it.
+      Pick one.
+    </p>
+
+    <div class="switch" role="tablist" aria-label="Rules">
+      <button role="tab" aria-selected="true" data-r="size">sizeCap</button>
+      <button role="tab" aria-selected="false" data-r="contracts">contractsPerDay</button>
+      <button role="tab" aria-selected="false" data-r="commission">commission</button>
+      <button role="tab" aria-selected="false" data-r="ratchet">lossRatchet</button>
+      <button role="tab" aria-selected="false" data-r="flatten">flattenBy</button>
+      <button role="tab" aria-selected="false" data-r="floor">sizeFloor</button>
+    </div>
+
+    <div class="card" id="card"></div>
+  </section>
+
+  <section>
+    <h2>What it actually does during a session</h2>
+    <p class="lede">
+      No build step, no framework. One Node process on port 7433, one WebSocket, a plain
+      browser page, and a Chrome DevTools link into TradingView Desktop.
+    </p>
+
+    <div class="marg">
+      <div class="fact">reads the chart</div>
+      <div>
+        <p>Watchers poll the live chart for engulfing candles on 1H, 30M, 15M and 5M, fair-value
+        gaps, swing-failure patterns, and the mechanical accumulation–manipulation–distribution phase.</p>
+        <p>A single chart lock serialises them, because there is one TradingView connection and
+        a watcher that steals the chart mid-read leaves it somewhere you did not put it.</p>
+      </div>
+
+      <div class="fact">reads the broker</div>
+      <div>
+        <p>Position size, open orders and day P&amp;L come straight off the connected broker panel,
+        folded by balance-delta at flat.</p>
+        <p>The app also cross-checks its own ledger against the broker and reports the gap rather
+        than quietly picking a winner.</p>
+      </div>
+
+      <div class="fact">argues</div>
+      <div>
+        <p>Nine personas on one model: a coach, a voice coach, a scalper, an analyst, a refuter
+        that attacks the analyst's case, a judge that settles it, a Power-of-3 reader, a
+        post-session analyst, and the loop.</p>
+        <p>Only the judge may issue a trade ticket, and only after the refuter has had its turn.</p>
+      </div>
+
+      <div class="fact">remembers</div>
+      <div>
+        <p>Every line that appears in the chat pane is written to an append-only archive that is
+        never trimmed. Repeated mistakes and repeated good trades are filed as episodes with a
+        citation back to the record that proves them.</p>
+        <p>The loop speaks only when something is a repeat, and it can quote what it told you the
+        last time.</p>
+      </div>
+
+      <div class="fact">explains</div>
+      <div>
+        <p>A losing day gets one cause, not a list. Trades are walked in sequence to find the
+        turning point — the first loss followed by a real size escalation — and every losing
+        trade is attributed to exactly one cause, so the dollars add up to the day.</p>
+        <p>A day of clean losses is given no cause at all.</p>
+      </div>
+
+      <div class="fact">stops you</div>
+      <div>
+        <p>Checklist gate, size cap, contracts-per-day ceiling, cooldown after a loss, a
+        size-freeze that blocks sizing up while you are down, tiered daily loss alarms, the day
+        stop, and a hard flatten at 3am.</p>
+        <p>Skipping the pre-session checklist is a hard no-go, ranked with the daily stop.</p>
+      </div>
+    </div>
+
+    <div class="hud" aria-hidden="true">
+      <div>Clear — 2 of 10 trades <b>day −$84.20</b></div>
+      <div>Cooldown 14:32 <b>no entries</b></div>
+      <div>News blackout — red folder <b>no entries</b></div>
+      <div>Stopped — done for the day <b>type “i am done”</b></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Two things can send a real order</h2>
+    <p class="lede">Everything else in this repository is advisory. These two are not.</p>
+
+    <div class="grave">
+      <p><b>You confirm a ticket.</b> The judge returns a go verdict carrying a machine-readable
+      ticket. It appears on screen. Nothing happens until you press confirm, and the gate that
+      checks it has no override path.</p>
+      <p><b>The oversize guard acts unasked.</b> If it reads a position above your cap twice in a
+      row, it sends a reducing order — never a closing or flipping one — capped at six actions a
+      day with a thirty-second cooldown, and logs the size it saw, the order it sent and whether
+      the broker took it.</p>
+      <p>Both live behind a separate launcher. Start the app the ordinary way and the guard can
+      only sound the alarm. <code>START CO-PILOT (LIVE ORDERS).bat</code> is a deliberate act.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Scale</h2>
+    <p class="lede">One process, one file for the rules, and a test suite for anything that makes a decision.</p>
+    <dl class="scale">
+      <div><dt>104</dt><dd>server modules, plus 24 in the browser</dd></div>
+      <div><dt>119</dt><dd>test files on Node's own runner, no framework</dd></div>
+      <div><dt>93</dt><dd>WebSocket message types, one dispatcher</dd></div>
+      <div><dt>13</dt><dd>panels: analysis, checklist, journal, brief, forensics, week, insights, alignment, ladder, rules, roadmap, lifetime, cost</dd></div>
+    </dl>
+  </section>
+
+  <section>
+    <h2>What is not verified</h2>
+    <p class="lede">
+      This page would be worth less without this part. The repository keeps built and
+      live-verified as separate words.
+    </p>
+    <div class="marg">
+      <div class="fact">unverified</div>
+      <div>
+        <p>The live P&amp;L fold has never been checked against a real closed trade with non-zero
+        P&amp;L. Every live size and P&amp;L figure sits on top of it.</p>
+      </div>
+      <div class="fact">broken</div>
+      <div>
+        <p>Setting a price on a TradingView alert does not take. It creates the alert at the
+        current market price instead, so the function fails loudly rather than reporting a
+        success it did not achieve.</p>
+      </div>
+      <div class="fact">shadow only</div>
+      <div>
+        <p>The ADX breakout playbook records what it would have done and can place nothing. It has
+        never traded.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Run it</h2>
+    <div class="run">
+      <span class="c">— relaunches TradingView with the debugger open, waits, then starts the server</span><br>
+      <span class="p">&gt;</span> "START CO-PILOT.bat"<br><br>
+      <span class="c">— or just the server, if TradingView is already up</span><br>
+      <span class="p">&gt;</span> cd app &amp;&amp; node server.js<br>
+      <span class="c">  http://localhost:7433</span>
+    </div>
+  </section>
+
+  <footer>
+    <div>Built for one trader. Not a product, not a signal service, not a bot.</div>
+    <span>G:\MNQ-CoPilot</span>
+  </footer>
+
+</div>
+
+<script>
+  // Hero: one orchestrated draw, once, when the figure is on screen.
+  (function () {
+    var fig = document.getElementById('fig');
+    if (!('IntersectionObserver' in window)) { fig.classList.add('go'); return; }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { fig.classList.add('go'); io.disconnect(); }
+      });
+    }, { threshold: 0.25 });
+    io.observe(fig);
+  })();
+
+  // The annotated rules. Text condensed from the real _comment fields in app/rules.json.
+  var RULES = {
+    size: {
+      k: '"sizeCap"', v: '4',
+      why: 'Fixed on <em>2026-07-28</em>: it had been 6, three times looser than the hard rule ' +
+           'the app claimed to enforce. The evaluation breach a week earlier was exactly this — ' +
+           'five lots, doubled to ten, against a stated cap of two the app was never actually ' +
+           'checking. Eval permits up to 4. Funded clamps back to 2 and can only ever tighten.'
+    },
+    contracts: {
+      k: '"contractsPerDay.max"', v: '12',
+      why: 'Trade count and entry size were both capped; total contracts for the day was not. ' +
+           'Ten legal two-lot trades is twenty contracts, every one inside the rules, day already ' +
+           'lost. The split in his own logged days lands on this line: <em>10c +$440, 11c +$157.50, ' +
+           '12c −$142, 24c −$879.50, 29c −$572.50</em>.'
+    },
+    commission: {
+      k: '"commissionPerContractPerSide"', v: '0.95',
+      why: 'Corrected from 0.59 on <em>2026-08-24</em> after the app\'s balance drifted above the ' +
+           'broker\'s. Replaying five days of real fills at 0.95 lands on the broker\'s own ' +
+           'start-of-day figure to the cent; at 0.59 it misses by exactly 193 contracts × $0.72. ' +
+           'Do not change it back without evidence of the same standard.'
+    },
+    ratchet: {
+      k: '"lossRatchet.mode"', v: '"min"',
+      why: 'His own rule: tomorrow\'s maximum loss may never exceed what he made today. Written ' +
+           'literally, an $800 green day would authorise an $800 loss tomorrow — four times the ' +
+           'normal cap, loosening risk exactly after the good days that historically precede a ' +
+           'blow-up. <em>min</em> takes the tighter of the two, so it can only ratchet down.'
+    },
+    flatten: {
+      k: '"flattenByISTMinutes"', v: '180',
+      why: '03:00 India time, in his words: nothing carries overnight. A hard flatten, not a ' +
+           'preference — whatever the position is showing, it closes. Overnight gap risk on a ' +
+           'prop account is uncapped by the intraday drawdown rules that protect him the rest of ' +
+           'the day.'
+    },
+    floor: {
+      k: '"sizeFloor"', v: '2',
+      why: 'A floor, not a cap. One-contract trades lose money in both stages — <em>25% win rate ' +
+           'in evaluation, 54% when funded, negative in both</em> — because the wins are too small ' +
+           'to pay for the losses. Sizing down to one is not caution; it is what hesitation looks ' +
+           'like in the ledger.'
+    }
+  };
+
+  var card = document.getElementById('card');
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.switch button'));
+
+  function show(key) {
+    var r = RULES[key];
+    card.className = 'card fade';
+    card.innerHTML = '<span class="k">' + r.k + '</span>: <span class="v">' + r.v + '</span>,' +
+                     '<span class="why">' + r.why + '</span>';
+    tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.r === key)); });
+  }
+
+  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.r); }); });
+  show('size');
+</script>
+</body>
+</html>
